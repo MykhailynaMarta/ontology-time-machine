@@ -1,7 +1,3 @@
-
-### `README.md`
-
-```markdown
 # PAC (Proxy Auto-Configuration) Server for Ontology Time Machine
 
 This component introduces a dynamic PAC (Proxy Auto-Configuration) server for the Ontology Time Machine proxy built on top of `proxy.py`. It addresses the traffic routing efficiency issues, specifically preventing performance bottlenecks when running the proxy in `restrictedAccess` mode.
