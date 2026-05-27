@@ -1,129 +1,135 @@
-# ontology-time-machine
+Ось професійний, детальний та структурований файл `README.md` англійською мовою. Він розбитий за стандартами Open Source проєктів, описує проблему, твоє архітектурне рішення, процес запуску та тестування.
 
-A time machine proxy. This proxy enables access to specific historical versions of ontologies, ensuring that they can be retrieved even if no longer available at their original source.
+---
 
+### `README.md`
 
-## Configuration options
+```markdown
+# PAC (Proxy Auto-Configuration) Server for Ontology Time Machine
 
-### defaultOntoVersion (default: `originalFailoverLive`)
+This component introduces a dynamic PAC (Proxy Auto-Configuration) server for the Ontology Time Machine proxy built on top of `proxy.py`. It addresses the traffic routing efficiency issues, specifically preventing performance bottlenecks when running the proxy in `restrictedAccess` mode.
 
-- **original**
-  - Intercepts requests but serves the original upstream ontology response. 
+---
 
-- **originalFailoverLiveLatest**
-  - The proxy tries to determine the live status during the request. If there is an accessibility failure, it hands over to Archivo to serve the latest version from there in case a failure is detected.
+## The Problem (Issue #90)
 
-- **latestArchived**
-  - Proxy always serves the latest version of an ontology directly from Archivo (if it is contained in it). 
-  - This is considered the most robust mode in terms of accessibility (can be useful if the original hosted version has syntax errors in RDF, as partially recovered files are served from Archivo).
+When using the ontology proxy, routing **all** global internet traffic (videos, images, general web pages) through the proxy server introduces massive bandwidth overhead and stability risks. 
 
-- **timestampArchived `<timestamp>`**
-  - Proxy always serves the version of an ontology directly from Archivo (if it is contained in it).
+To solve this, a **Restricted Mode** was introduced to filter out non-ontology traffic. However:
+1. **Tooling Limitations:** Traditional CLI tools (`curl`), Java applications, and RDF frameworks (e.g., Apache Jena, RDFLib) do not natively execute or respect JavaScript-based PAC files. They rely entirely on environment variables like `HTTP_PROXY`.
+2. **Stateless PAC Overhead:** The dataset containing Archivo ontology domains can grow exponentially large (tens of thousands of items). Iterating through a massive array using standard loops (`for...in`) inside a stateless PAC file for *every single HTTP request* severely degrades client-side browser performance.
 
+---
 
-### ontoFormat 
+## Architectural Solution
 
-- **Arguments**: 2 required + 1 optional (default is `ntriples,enforcedPriority,false`)
-  - **format**: Desired representation of the (ontology) resource, one of:
-    - `"turtle"`
-    - `"ntriples"`
-    - `"rdfxml"`
-    - `"htmldocu"`
-  
-  - **precedence**: Controls how the desired format interacts with the client's `Accept` headers:
-    - **default**: The format is used as the default fallback if no format is specified in the `Accept` header by the client.
-    - **enforcedPriority**: Boosts the priority of the specified format as highest, even if the client specifies other formats with higher priority.
-      - **Example**: 
-        - If `enforcedPriority ntriples`:
-        - Client sends: turtle only → no change to `Accept` header.
-        - Client sends: turtle, ntriples → `ntriples` will be added with the highest priority (1.0 score) at the beginning of the `Accept` string.
-    
-    - **always**: Ignores the client’s preferences in the `Accept` header.
+This implementation solves both challenges through a hybrid and highly optimized approach:
 
-    - **NOTE**: By default, these parameters only affect requests served by Archivo. If they should apply to all upstream connections, use `patchAcceptUpstream`.
+### 1. Main-Process Server Spawning
+Because `proxy.py` operates in a multi-processing threadless architecture (spawning multiple isolated worker acceptors), running a background thread within a plugin hook would cause race conditions and `Address already in use` crashes. 
+The PAC HTTP server is safely bound and spawned on port `8000` from the **main process** prior to initiating the `proxy.py` engine loop.
 
-    - **ATTENTION**: In `default` or `enforcedPriority` mode, an HTTP error code 406 is thrown if the request triggers a response from Archivo, but no supported format matches the (modified) `Accept` header (e.g., `Accept` header is just JSON-LD).
+### 2. O(1) JavaScript Optimization
+Instead of linear array scanning, the generator transforms the python domain config into a JavaScript **Hash-Table (Object lookup)**. Subdomain matching is handled by popping domain segments using `.split('.')` rather than checking string suffixes against thousands of entries. This guarantees an $O(1)$ average complexity lookup, protecting client machine resources.
 
-  - **patchAcceptUpstream** (optional, default: `false`)
-    - Defines whether the `Accept` header is patched only for proxy internal behavior or is actually sent in the changed form to the upstream server.
+### 3. Smart Fallback Routing
+* **Browsers:** Fetch the configuration from `http://localhost:8000/proxy.pac` and handle routing efficiently on the client-side.
+* **Non-JS Tools (`curl`, JVM):** When pointing these tools to the proxy port directly, the internal `OntologyTimeMachinePlugin` fallback hooks intercepts the traffic and passes non-ontology requests transparently (`DIRECT`), fulfilling the stateless failsafe promise.
 
-### restrictedAccess (default: `disabled`)
+---
 
-- Enable mode to only serve requests to URLs of Archivo ontologies. All others are denied/discarded by sending a proxy status 407 response and a message that you need to deploy your own proxy instance to make that work.
+## Generated PAC Code Behavior
 
-### httpsInterception 
+Depending on your configuration, the PAC server dynamically switches between two states:
 
-- (If a CA cert is provided, this option can be used to control HTTPS interception for a specific set of fully qualified domain names (FQDNs), default is `none`):
-  - **none** (default)
-    - No HTTPS interception is performed, but the request is passed through.
-    - **NOTE**: When hosting this publicly, this can be abused by clients to connect to any port and e.g. send spam messages.
-
-  - **block**
-    - All HTTPS connections will be blocked.
-
-  - **archivo**
-    - HTTPS interception only for FQDNs that have at least one ontology in Archivo.
-      - **NOTE**: This will block other requests as well.
-
-  - **all**
-    - For every request to every domain (FQDN).
-
-
-### IN PROGRESS: authMode (default: `off`)
-
-- **off**: No authentication required.
-- **basic**: Basic authentication with user-provided password and username on startup (`--auth user:pass`).
-- **time travel timestamp**: Username provides a timestamp.
-- **apply request-based configuration**
-
-
-## Installation
-
-### Before building the docker file:
+### A. Normal Mode (`restrictedAccess = False`)
+Instructs the client to route all traffic directly through the proxy endpoint.
+```javascript
+function FindProxyForURL(url, host) {
+    return "PROXY 127.0.0.1:8898";
+}
 
 ```
-git clone https://github.com/abhinavsingh/proxy.py.git
-cd proxy.py
-make ca-certificates
-cp ca-cert.pem ~/ontology-time-machine/ca-cert.pem
-cp ca-key.pem ~/ontology-time-machine/ca-key.pem
-cp ca-signing-key.pem ~/ontology-time-machine/ca-signing-key.pem
+
+### B. Restricted Mode (`restrictedAccess = True`)
+
+Injects the optimized hash-table lookup. Only matched ontology domains go to the proxy; the rest bypass it instantly via `DIRECT`.
+
+```javascript
+var archivoDomains = {
+    "dbpedia.org": true,
+    "w3.org": true,
+    "wikipedia.org": true
+};
+
+function isOntologyHost(host) {
+    if (!host) return false;
+    host = host.toLowerCase();
+
+    // 1. Instant O(1) Hash-Table Check
+    if (archivoDomains[host]) return true;
+
+    // 2. High-performance Subdomain Slicing
+    var parts = host.split('.');
+    while (parts.length > 1) {
+        parts.shift();
+        var parentDomain = parts.join('.');
+        if (archivoDomains[parentDomain]) return true;
+    }
+
+    return false;
+}
+
+function FindProxyForURL(url, host) {
+    if (isOntologyHost(host)) {
+        return "PROXY 127.0.0.1:8898";
+    }
+    return "DIRECT";
+}
+
 ```
 
-### Install poetry virtual environment
-```
-poetry install
-```
+---
 
+## How to Run & Verify
 
-### Docker command:
-- docker build -t ontology_time_machine:0.1 .
-- docker run -d -e PORT=8899 -p 8182:8899 ontology_time_machine:0.1
+1. Run your proxy server using your custom proxy startup script:
+```bash
+python custom_proxy.py
 
-
-## Usage
-
-### Activate poetry environment
-```
-poetry shell
 ```
 
-### Starting the proxy
 
-python3 ontologytimemachine/custom_proxy.py --ontoFormat ntriples --ontoVersion originalFailoverLiveLatest --ontoPrecedence enforcedPriority
+2. Verify the PAC server thread log in your console:
+```text
+[PAC] Starting PAC server thread from main process...
+[PAC] http://localhost:8000/proxy.pac
+[PAC] PAC server thread successfully spawned
 
-
-## Manual tests
-
-### Curl tests:
-- curl -x http://0.0.0.0:8899 --cacert ca-cert.pem http://www.google.com
-- curl -x http://0.0.0.0:8899 -H "Accept: text/turtle" --cacert ca-cert.pem http://linked-web-apis.fit.cvut.cz/ns/core
-- curl -x http://0.0.0.0:8899 --cacert ca-cert.pem https://www.w3id.org/simulation/ontology/
-- curl -x http://0.0.0.0:8899 --cacert ca-cert.pem https://www.w3.org/ns/ldt#
-- curl -x http://0.0.0.0:8899 --cacert ca-cert.pem https://raw.githubusercontent.com/br0ast/simulationontology/main/Ontology/simulationontology.owl
-- curl -x http://0.0.0.0:8899 -H "Accept: text/turtle" --cacert ca-cert.pem http://bblfish.net/work/atom-owl/2006-06-06/
-- curl -x http://0.0.0.0:8899 -H "Accept: text/turtle" --cacert ca-cert.pem http://purl.org/makolab/caont/
-- curl -x http://0.0.0.0:8899 --cacert ca-cert.pem https://vocab.eccenca.com/auth/
-- curl -x http://0.0.0.0:8899 -H "Accept: text/turtle" --cacert ca-cert.pem http://dbpedia.org/ontology/Person
+```
 
 
+3. Open your browser or use `curl` to inspect the generated routing rules:
+```bash
+curl http://localhost:8000/proxy.pac
+
+```
+
+
+
+---
+
+## Testing
+
+Comprehensive unit tests cover the PAC generator logic, ensuring strict syntax validation and checking correct interface IP mapping (e.g., transforming `0.0.0.0` or `::` interface arrays into a browser-compliant `127.0.0.1` single endpoint).
+
+Execute the test suite using `pytest`:
+
+```bash
+pytest -v tests/pac/test_pac.py
+
+```
+
+```
+
+```

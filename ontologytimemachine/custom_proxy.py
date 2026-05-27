@@ -25,7 +25,10 @@ from ontologytimemachine.utils.config import (
     ClientConfigViaProxyAuth,
     parse_arguments
 )
-
+# for resolving issue 90
+from ontologytimemachine.pac.generator import build_pac
+from ontologytimemachine.pac.server import start_pac_server
+import threading
 
 default_cfg: Config = Config()
 config = default_cfg
@@ -56,25 +59,52 @@ class OntologyTimeMachinePlugin(HttpProxyBasePlugin):
         # print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~___________________________OntologyTimeMachinePlugin')
         logger.info(f"~~~~~~~~~~~___________________________OntologyTimeMachinePlugin Init - Object ID: {id(self)}")
         super().__init__(*args, **kwargs)
+
+        # self.config = config
+        # logger.info(f"Config: {self.config}")
         self.config = config
-        logger.info(f"Config: {self.config}")
+
+        logger.info(
+            "Proxy configuration loaded",
+            extra={
+                "restricted_access": getattr(config, "restrictedAccess", None),
+                "proxy_port": getattr(config, "port", None),
+            }
+        )
+
+    _started = False
+
+    def start_services(self):
+        logger.info("[PAC] BEFORE THREAD")
+
+        def run():
+            try:
+                logger.info("[PAC] INSIDE THREAD START")
+                start_pac_server(self.config)
+            except Exception as e:
+                logger.error(f"[PAC] CRASH: {e}", exc_info=True)
+
+
+        threading.Thread(target=run, daemon=True).start()
+
+        logger.info("[PAC] THREAD CREATED")
 
     def before_upstream_connection(self, request: HttpParser) -> HttpParser | None:
         # self.client.config = QUOTE_NONE
         logger.info("Before upstcream connection hook")
         logger.info(f"Request method: {request.method} - Request host: {request.host} - Request path: {request.path} - Request headers: {request.headers}")
         wrapped_request = HttpRequestWrapper(request)
-        
+
         try:
             self.client.request_host = wrapped_request.get_request_host()
         except:
             logger.info('No host')
-        
+
         try:
             self.client.request_path = wrapped_request.get_request_path()
         except:
             logger.info('No path')
-                
+
 
         if (self.config.clientConfigViaProxyAuth == ClientConfigViaProxyAuth.REQUIRED or self.config.clientConfigViaProxyAuth == ClientConfigViaProxyAuth.OPTIONAL):
             logger.info('Setting up config from auth')
@@ -98,8 +128,8 @@ class OntologyTimeMachinePlugin(HttpProxyBasePlugin):
             config = self.client.config
         else:
             logger.info("Using the proxy configuration")
-            config = self.config            
-        
+            config = self.config
+
         if wrapped_request.is_connect_request():
             logger.info("Handling CONNECT request: configured HTTPS interception mode: %s", config.httpsInterception)
             # Mark if there is a connect request
@@ -113,7 +143,7 @@ class OntologyTimeMachinePlugin(HttpProxyBasePlugin):
             else:
                 logger.info("CONNECT request was blocked due to the configuration")
                 return None
-    
+
         if not wrapped_request.is_connect_request():
             logger.info('Skip for the connect request')
             if not wrapped_request.get_request_host():
@@ -222,7 +252,23 @@ class OntologyTimeMachinePlugin(HttpProxyBasePlugin):
 if __name__ == "__main__":
 
     config = parse_arguments()
+    # config.restrictedAccess = True
+    # config.archivoDomains = ["dbpedia.org", "w3.org", "wikipedia.org"]
     from ontologytimemachine.utils.config import logger
+
+    logger.info("[PAC] Starting PAC server thread from main process...")
+
+
+    def run_pac():
+        try:
+            start_pac_server(config)
+        except Exception as e:
+            logger.error(f"[PAC] CRASH: {e}", exc_info=True)
+
+
+    threading.Thread(target=run_pac, daemon=True).start()
+    logger.info("[PAC] PAC server thread successfully spawned")
+    # --------------------------------------------------
 
     sys.argv = [sys.argv[0]]
 
